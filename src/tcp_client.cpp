@@ -3,6 +3,7 @@
 
 
 pipe_ret_t TcpClient::connectTo(const std::string & address, int port) {
+    stop = false;
     m_sockfd = 0;
     pipe_ret_t ret;
 
@@ -12,6 +13,12 @@ pipe_ret_t TcpClient::connectTo(const std::string & address, int port) {
         ret.msg = strerror(errno);
         return ret;
     }
+
+    struct timeval tv = {
+        .tv_sec = 1
+    };
+    setsockopt(m_sockfd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+    setsockopt(m_sockfd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
 
     int inetSuccess = inet_aton(address.c_str(), &m_server.sin_addr);
 
