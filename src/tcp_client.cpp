@@ -15,7 +15,7 @@ pipe_ret_t TcpClient::connectTo(const std::string & address, int port) {
     }
 
     struct timeval tv = {
-        .tv_sec = 1
+        .tv_sec = 5
     };
     setsockopt(m_sockfd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
     setsockopt(m_sockfd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
