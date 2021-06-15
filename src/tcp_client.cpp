@@ -8,17 +8,21 @@ pipe_ret_t TcpClient::connectTo(const std::string & address, int port) {
     pipe_ret_t ret;
 
     m_sockfd = socket(AF_INET , SOCK_STREAM , 0);
+
     if (m_sockfd == -1) { //socket failed
         ret.success = false;
         ret.msg = strerror(errno);
         return ret;
     }
 
+    // without timeout no automatic reconnect
+    // we expect data much higher than 1Hz
     struct timeval tv = {
-        .tv_sec = 5
+        .tv_sec = 1
     };
     setsockopt(m_sockfd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
     setsockopt(m_sockfd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
+
 
     int inetSuccess = inet_aton(address.c_str(), &m_server.sin_addr);
 
@@ -115,15 +119,15 @@ void TcpClient::ReceiveTask() {
         if(numOfBytesReceived < 1) {
             pipe_ret_t ret;
             ret.success = false;
-            stop = true;
             if (numOfBytesReceived == 0) { //server closed connection
-                ret.msg = "Server closed connection";
+                ret.msg = "Server closed connection.";
             } else {
                 ret.msg = strerror(errno);
             }
-            publishServerDisconnected(ret);
-            finish();
-            break;
+			std::cout << ret.msg << std::endl;
+			publishServerDisconnected(ret);
+			finish();
+			break;
         } else {
             publishServerMsg(msg, numOfBytesReceived);
         }

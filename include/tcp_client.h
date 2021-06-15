@@ -16,14 +16,13 @@
 #include <netinet/in.h>
 #include <arpa/inet.h>
 #include <netdb.h>
-#include <netdb.h>
 #include <vector>
 #include <errno.h>
 #include <thread>
 #include "client_observer.h"
 #include "pipe_ret_t.h"
 
-#define MAX_PACKET_SIZE 4096
+#define MAX_PACKET_SIZE 2048
 
 
 
