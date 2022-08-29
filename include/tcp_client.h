@@ -34,6 +34,7 @@ class TcpClient
 private:
     int m_sockfd = 0;
     bool stop = false;
+    bool connected = false;
     struct sockaddr_in m_server;
     std::vector<client_observer_t> m_subscibers;
     std::thread * m_receiveTask = nullptr;
