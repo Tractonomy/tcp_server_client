@@ -1,4 +1,5 @@
 #include "../include/tcp_client.h"
+#include <netinet/tcp.h>
 
 
 pipe_ret_t TcpClient::connectTo(const std::string & address, int port)
@@ -15,17 +16,51 @@ pipe_ret_t TcpClient::connectTo(const std::string & address, int port)
     return ret;
   }
 
-  // without timeout no automatic reconnect
-  // we expect data much higher than 1Hz
-  // reconnect after 30sec to make sure MCU has discovered disconnect
-  struct timeval tv = {
-    .tv_sec = 30
+  // timeout of receive set to 0 as we do not want to disconnect when nothing is received
+  struct timeval tv_recv = {
+    .tv_sec = 0,
+    .tv_usec = 0,
   };
-  if (setsockopt(m_sockfd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv)) == -1) {
+  // set timeout for send to inform user of slow connection
+  struct timeval tv_send = {
+    .tv_sec = 0,
+    .tv_usec = 100000,
+  };
+
+  if (setsockopt(m_sockfd, SOL_SOCKET, SO_RCVTIMEO, &tv_recv, sizeof(tv_recv)) == -1) {
     std::cerr << "RCVTIMEO error" << std::endl;
   }
-  if (setsockopt(m_sockfd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv)) == -1) {
+  if (setsockopt(m_sockfd, SOL_SOCKET, SO_SNDTIMEO, &tv_send, sizeof(tv_send)) == -1) {
     std::cerr << "SNDTIMEO error" << std::endl;
+  }
+
+  /** Enable keep alive mode
+   */
+  int keepalive = 1;
+  /** The time (in seconds) the connection needs to remain
+   * idle before TCP starts sending keepalive probes (TCP_KEEPIDLE socket option)
+   */
+  int keepidle = 1;
+  /** The maximum number of keepalive probes TCP should
+   * send before dropping the connection. (TCP_KEEPCNT socket option)
+   */
+  int keepcnt = 3;
+  /** The time (in seconds) between individual keepalive probes.
+   *  (TCP_KEEPINTVL socket option)
+   */
+  int keepintvl = 1;
+  if (setsockopt(m_sockfd, SOL_SOCKET, SO_KEEPALIVE, &keepalive, sizeof(keepalive)) == -1) {
+    std::cerr << "KEEPALIVE error" << std::endl;
+  }
+  //set the keepalive options
+  if (setsockopt(m_sockfd, IPPROTO_TCP, TCP_KEEPCNT, &keepcnt, sizeof(keepcnt)) != 0) {
+    std::cerr << "TCP_KEEPCNT error" << std::endl;
+  }
+  if (setsockopt(m_sockfd, IPPROTO_TCP, TCP_KEEPIDLE, &keepidle, sizeof(keepidle)) != 0) {
+    std::cerr << "TCP_KEEPIDLE error" << std::endl;
+  }
+  if (setsockopt(m_sockfd, IPPROTO_TCP, TCP_KEEPINTVL, &keepintvl, sizeof(keepintvl)) != 0) {
+    std::cerr << "TCP_KEEPINTVL error" << std::endl;
   }
 
   int inetSuccess = inet_aton(address.c_str(), &m_server.sin_addr);
@@ -70,6 +105,7 @@ pipe_ret_t TcpClient::sendMsg(const char * msg, size_t size)
   ssize_t numBytesSent = send(m_sockfd, msg, size, 0);
   if (numBytesSent < 0) {    // send failed
     ret.success = false;
+    ret.code = errno;
     ret.msg = strerror(errno);
     return ret;
   }
@@ -134,19 +170,15 @@ void TcpClient::ReceiveTask()
   while (!stop) {
     char msg[MAX_PACKET_SIZE];
     int numOfBytesReceived = recv(m_sockfd, msg, MAX_PACKET_SIZE, 0);
-    if (numOfBytesReceived < 1) {
+    if (numOfBytesReceived < 0) {
       pipe_ret_t ret;
       ret.success = false;
-      if (numOfBytesReceived == 0) {       //server closed connection
-        ret.msg = "Server closed connection.";
-      } else {
-        ret.msg = strerror(errno);
-      }
-      std::cout << ret.msg << std::endl;
+      ret.msg = strerror(errno);
+      std::cerr << ret.msg << std::endl;
       publishServerDisconnected(ret);
       finish();
       break;
-    } else {
+    } else if (numOfBytesReceived > 0) {
       publishServerMsg(msg, numOfBytesReceived);
     }
   }
