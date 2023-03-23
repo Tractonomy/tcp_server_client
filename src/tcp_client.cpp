@@ -37,6 +37,13 @@ pipe_ret_t TcpClient::connectTo(
   if (setsockopt(m_sockfd, SOL_SOCKET, SO_SNDTIMEO, &tv_send, sizeof(tv_send)) == -1) {
     std::cerr << "SNDTIMEO error" << std::endl;
   }
+  const int enable = 1;
+  if (setsockopt(m_sockfd, SOL_SOCKET, SO_REUSEADDR, &enable, sizeof(int)) == -1) {
+    std::cerr << "REUSEADDR error" << std::endl;
+  }
+  if (setsockopt(m_sockfd, SOL_SOCKET, SO_REUSEPORT, &enable, sizeof(int)) == -1) {
+    std::cerr << "REUSEPORT error" << std::endl;
+  }
 
   /** Enable keep alive mode
    */

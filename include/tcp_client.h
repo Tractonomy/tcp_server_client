@@ -53,7 +53,6 @@ public:
 
   void subscribe(const client_observer_t & observer);
   void unsubscribeAll();
-  void publish(const char * msg, size_t msgSize);
 
   pipe_ret_t finish();
 };
