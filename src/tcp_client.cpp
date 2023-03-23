@@ -37,11 +37,12 @@ pipe_ret_t TcpClient::connectTo(
   if (setsockopt(m_sockfd, SOL_SOCKET, SO_SNDTIMEO, &tv_send, sizeof(tv_send)) == -1) {
     std::cerr << "SNDTIMEO error" << std::endl;
   }
-  const int enable = 1;
-  if (setsockopt(m_sockfd, SOL_SOCKET, SO_REUSEADDR, &enable, sizeof(int)) == -1) {
+
+  int option = 1;
+  if (setsockopt(m_sockfd, SOL_SOCKET, SO_REUSEADDR, &option, sizeof(int)) == -1) {
     std::cerr << "REUSEADDR error" << std::endl;
   }
-  if (setsockopt(m_sockfd, SOL_SOCKET, SO_REUSEPORT, &enable, sizeof(int)) == -1) {
+  if (setsockopt(m_sockfd, SOL_SOCKET, SO_REUSEPORT, &option, sizeof(int)) == -1) {
     std::cerr << "REUSEPORT error" << std::endl;
   }
 
@@ -102,7 +103,7 @@ pipe_ret_t TcpClient::connectTo(
   // This ip address will change according to the machine
   m_client.sin_addr.s_addr = inet_addr(client_addr.c_str());
 
-  int bindRet = bind(m_sockfd, (struct sockaddr *)&m_client, sizeof(struct sockaddr_in));
+  int bindRet = bind(m_sockfd, (struct sockaddr *)&m_client, sizeof(m_client));
   if (bindRet == -1) {
     ret.success = false;
     ret.msg = strerror(errno);
@@ -238,5 +239,7 @@ void TcpClient::terminateReceiveThread()
 
 TcpClient::~TcpClient()
 {
-  terminateReceiveThread();
+  printf("shutting down\r\n");
+  shutdown(m_sockfd, SHUT_RDWR);
+  finish();
 }
