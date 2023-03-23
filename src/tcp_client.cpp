@@ -2,7 +2,11 @@
 #include <netinet/tcp.h>
 
 
-pipe_ret_t TcpClient::connectTo(const std::string & address, int port)
+pipe_ret_t TcpClient::connectTo(
+  const std::string & server_addr,
+  int server_port,
+  const std::string & client_addr,
+  int client_port)
 {
   stop = false;
   m_sockfd = 0;
@@ -63,13 +67,13 @@ pipe_ret_t TcpClient::connectTo(const std::string & address, int port)
     std::cerr << "TCP_KEEPINTVL error" << std::endl;
   }
 
-  int inetSuccess = inet_aton(address.c_str(), &m_server.sin_addr);
+  int inetSuccess = inet_aton(server_addr.c_str(), &m_server.sin_addr);
 
   if (!inetSuccess) {  // inet_addr failed to parse address
     // if hostname is not in IP strings and dots format, try resolve it
     struct hostent * host;
     struct in_addr ** addrList;
-    if ( (host = gethostbyname(address.c_str() ) ) == NULL) {
+    if ( (host = gethostbyname(server_addr.c_str() ) ) == NULL) {
       ret.success = false;
       ret.msg = "Failed to resolve hostname";
       return ret;
@@ -78,7 +82,25 @@ pipe_ret_t TcpClient::connectTo(const std::string & address, int port)
     m_server.sin_addr = *addrList[0];
   }
   m_server.sin_family = AF_INET;
-  m_server.sin_port = htons(port);
+  m_server.sin_port = htons(server_port);
+
+  struct sockaddr_in m_client;
+  // Explicitly assigning port from paramters
+  // binding client with that port
+  // this allows multiple clients in same process to define different port
+  m_client.sin_family = AF_INET;
+  m_client.sin_addr.s_addr = INADDR_ANY;
+  m_client.sin_port = htons(client_port);
+
+  // This ip address will change according to the machine
+  m_client.sin_addr.s_addr = inet_addr(client_addr.c_str());
+
+  int bindRet = bind(m_sockfd, (struct sockaddr *)&m_client, sizeof(struct sockaddr_in));
+  if (bindRet == -1) {
+    ret.success = false;
+    ret.msg = strerror(errno);
+    return ret;
+  }
 
   int connectRet = connect(m_sockfd, (struct sockaddr *)&m_server, sizeof(m_server));
   if (connectRet == -1) {
