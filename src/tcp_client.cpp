@@ -65,6 +65,13 @@ void TcpClient::setAddress(const std::string& address, int port) {
 
 
 pipe_ret_t TcpClient::sendMsg(const char * msg, size_t size) {
+    if (!_isConnected) {
+        return pipe_ret_t::failure("not connected, not sending");
+    }
+    if (_isClosed) {
+        return pipe_ret_t::failure("client closed, not sending");
+    }
+
     const size_t numBytesSent = send(_sockfd.get(), msg, size, 0);
 
     if (numBytesSent < 0 ) { // send failed
