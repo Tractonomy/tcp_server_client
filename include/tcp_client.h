@@ -47,6 +47,7 @@ public:
     pipe_ret_t sendMsg(const char * msg, size_t size);
 
     void subscribe(const client_observer_t & observer);
+    void unsubscribeAll();
     bool isConnected() const { return _isConnected; }
     pipe_ret_t close();
 };

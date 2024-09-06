@@ -83,6 +83,12 @@ void TcpClient::subscribe(const client_observer_t & observer) {
     _subscibers.push_back(observer);
 }
 
+void TcpClient::unsubscribeAll()
+{
+    std::lock_guard<std::mutex> lock(_subscribersMtx);
+    _subscibers.clear();
+}
+
 /*
  * Publish incomingPacketHandler client message to observer.
  * Observers get only messages that originated
