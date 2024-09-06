@@ -28,6 +28,7 @@ private:
     std::atomic<bool> _isConnected;
     std::atomic<bool> _isClosed;
     struct sockaddr_in _server;
+    struct sockaddr_in _client;
     std::vector<client_observer_t> _subscibers;
     std::thread * _receiveTask = nullptr;
     std::mutex _subscribersMtx;
@@ -35,6 +36,7 @@ private:
     void initializeSocket();
     void startReceivingMessages();
     void setAddress(const std::string& address, int port);
+    void setClientAddress(const std::string& address, int port);
     void publishServerMsg(const char * msg, size_t msgSize);
     void publishServerDisconnected(const pipe_ret_t & ret);
     void receiveTask();
@@ -43,7 +45,9 @@ private:
 public:
     TcpClient();
     ~TcpClient();
-    pipe_ret_t connectTo(const std::string & address, int port);
+    pipe_ret_t connectTo(
+        const std::string & address, int port,
+        const std::string & client_addr = "0.0.0.0", int client_port = 0);
     pipe_ret_t sendMsg(const char * msg, size_t size);
 
     void subscribe(const client_observer_t & observer);

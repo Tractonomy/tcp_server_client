@@ -11,12 +11,20 @@ TcpClient::~TcpClient() {
     close();
 }
 
-pipe_ret_t TcpClient::connectTo(const std::string & address, int port) {
+pipe_ret_t TcpClient::connectTo(
+    const std::string & address, int port,
+    const std::string & client_addr, int client_port) {
     try {
         initializeSocket();
         setAddress(address, port);
+        setClientAddress(client_addr, client_port);
     } catch (const std::runtime_error& error) {
         return pipe_ret_t::failure(error.what());
+    }
+
+    const int bindResult = bind(_sockfd.get(), (struct sockaddr *)&_client, sizeof(_client));
+    if (bindResult == -1) {
+        return pipe_ret_t::failure(strerror(errno));
     }
 
     const int connectResult = connect(_sockfd.get() , (struct sockaddr *)&_server , sizeof(_server));
@@ -61,6 +69,18 @@ void TcpClient::setAddress(const std::string& address, int port) {
     }
     _server.sin_family = AF_INET;
     _server.sin_port = htons(port);
+}
+
+void TcpClient::setClientAddress(const std::string& address, int port) {
+    // Explicitly assigning port from parameters
+    // binding client with that port
+    // this allows multiple clients in same process to define different port
+    _client.sin_family = AF_INET;
+    _client.sin_addr.s_addr = INADDR_ANY;
+    _client.sin_port = htons(port);
+
+    // This ip address will change according to the machine
+    _client.sin_addr.s_addr = inet_addr(address.c_str());
 }
 
 
