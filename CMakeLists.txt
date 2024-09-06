@@ -12,6 +12,7 @@ add_library(${PROJECT_NAME}
         src/client.cpp
         src/pipe_ret_t.cpp
         src/common.cpp)
+target_include_directories(${PROJECT_NAME} PUBLIC include)
 
 option(SERVER_EXAMPLE "Build SERVER" ON)
 

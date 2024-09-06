@@ -1,6 +1,6 @@
 
-#include "../include/tcp_client.h"
-#include "../include/common.h"
+#include "tcp_client.h"
+#include "common.h"
 
 TcpClient::TcpClient() {
     _isConnected = false;

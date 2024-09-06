@@ -6,8 +6,8 @@
 #include <sys/socket.h>
 #include <iostream>
 
-#include "../include/client.h"
-#include "../include/common.h"
+#include "client.h"
+#include "common.h"
 
 Client::Client(int fileDescriptor) {
     _sockfd.set(fileDescriptor);

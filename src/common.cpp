@@ -1,6 +1,6 @@
 #include <cstdint>
-#include "../include/file_descriptor.h"
-#include "../include/common.h"
+#include "file_descriptor.h"
+#include "common.h"
 
 #include <sys/select.h>
 

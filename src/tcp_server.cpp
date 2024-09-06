@@ -2,8 +2,8 @@
 #include <functional>
 #include <thread>
 #include <algorithm>
-#include "../include/tcp_server.h"
-#include "../include/common.h"
+#include "tcp_server.h"
+#include "common.h"
 
 
 TcpServer::TcpServer() {
