@@ -1,6 +1,7 @@
 
 #include "tcp_client.h"
 #include "common.h"
+#include <netinet/tcp.h>
 
 TcpClient::TcpClient() {
     _isConnected = false;
@@ -47,10 +48,65 @@ void TcpClient::startReceivingMessages() {
 void TcpClient::initializeSocket() {
     pipe_ret_t ret;
 
-    _sockfd.set(socket(AF_INET , SOCK_STREAM , 0));
+    _sockfd.set(socket(AF_INET , SOCK_STREAM , IPPROTO_TCP));
     const bool socketFailed = (_sockfd.get() == -1);
     if (socketFailed) {
         throw std::runtime_error(strerror(errno));
+    }
+
+    // // timeout of receive set to 0 as we do not want to disconnect when nothing is received
+    struct timeval tv_recv = {
+        .tv_sec = 0,
+        .tv_usec = 0,
+    };
+    // set timeout for send to inform user of slow connection
+    struct timeval tv_send = {
+        .tv_sec = 0,
+        .tv_usec = 100000,
+    };
+
+    if (setsockopt(_sockfd.get(), SOL_SOCKET, SO_RCVTIMEO, &tv_recv, sizeof(tv_recv)) == -1) {
+        std::cerr << "RCVTIMEO error" << std::endl;
+    }
+    if (setsockopt(_sockfd.get(), SOL_SOCKET, SO_SNDTIMEO, &tv_send, sizeof(tv_send)) == -1) {
+        std::cerr << "SNDTIMEO error" << std::endl;
+    }
+
+    int option = 1;
+    if (setsockopt(_sockfd.get(), SOL_SOCKET, SO_REUSEADDR, &option, sizeof(int)) == -1) {
+        std::cerr << "REUSEADDR error" << std::endl;
+    }
+    if (setsockopt(_sockfd.get(), SOL_SOCKET, SO_REUSEPORT, &option, sizeof(int)) == -1) {
+        std::cerr << "REUSEPORT error" << std::endl;
+    }
+
+    /** Enable keep alive mode
+     */
+    int keepalive = 1;
+    /** The time (in seconds) the connection needs to remain
+     * idle before TCP starts sending keepalive probes (TCP_KEEPIDLE socket option)
+     */
+    int keepidle = 1;
+    /** The maximum number of keepalive probes TCP should
+     * send before dropping the connection. (TCP_KEEPCNT socket option)
+     */
+    int keepcnt = 3;
+    /** The time (in seconds) between individual keepalive probes.
+     *  (TCP_KEEPINTVL socket option)
+     */
+    int keepintvl = 1;
+    if (setsockopt(_sockfd.get(), SOL_SOCKET, SO_KEEPALIVE, &keepalive, sizeof(keepalive)) == -1) {
+        std::cerr << "KEEPALIVE error" << std::endl;
+    }
+    //set the keepalive options
+    if (setsockopt(_sockfd.get(), IPPROTO_TCP, TCP_KEEPCNT, &keepcnt, sizeof(keepcnt)) != 0) {
+        std::cerr << "TCP_KEEPCNT error" << std::endl;
+    }
+    if (setsockopt(_sockfd.get(), IPPROTO_TCP, TCP_KEEPIDLE, &keepidle, sizeof(keepidle)) != 0) {
+        std::cerr << "TCP_KEEPIDLE error" << std::endl;
+    }
+    if (setsockopt(_sockfd.get(), IPPROTO_TCP, TCP_KEEPINTVL, &keepintvl, sizeof(keepintvl)) != 0) {
+        std::cerr << "TCP_KEEPINTVL error" << std::endl;
     }
 }
 
