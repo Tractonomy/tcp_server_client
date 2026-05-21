@@ -15,6 +15,15 @@ TcpClient::~TcpClient() {
 pipe_ret_t TcpClient::connectTo(
     const std::string & address, int port,
     const std::string & client_addr, int client_port) {
+    // ATRS-1429 (defect #2): a caller may invoke connectTo() without first
+    // calling close() (e.g. PBHandler::connect() does this on reconnect). If a
+    // live socket / receive thread still exists, tear it down here so the new
+    // connection does not inherit a stale recv thread blocked in select() on
+    // the previous fd.
+    if (!_isClosed) {
+        close();
+    }
+
     try {
         initializeSocket();
         setAddress(address, port);
@@ -34,9 +43,18 @@ pipe_ret_t TcpClient::connectTo(
         return pipe_ret_t::failure(strerror(errno));
     }
 
-    startReceivingMessages();
+    // ATRS-1429 (defect #1): order matters. Set _isConnected BEFORE spawning
+    // the receive thread. receiveTask()'s outer loop is `while(_isConnected)`;
+    // if the new thread runs before this assignment it observes the leftover
+    // `false` from the previous terminateReceiveThread() and exits
+    // immediately. Sends keep succeeding (queued into the kernel TX buffer)
+    // until backpressure produces EPIPE much later, while nothing is
+    // consuming the RX buffer — exactly the dead-state where the driver
+    // believes it is connected but the kernel Recv-Q grows unbounded and no
+    // MCU response is ever delivered to the ROS callback.
     _isConnected = true;
     _isClosed = false;
+    startReceivingMessages();
 
     return pipe_ret_t::success();
 }
