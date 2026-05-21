@@ -148,14 +148,17 @@ pipe_ret_t TcpClient::sendMsg(const char * msg, size_t size) {
         return pipe_ret_t::failure("client closed, not sending");
     }
 
-    const size_t numBytesSent = send(_sockfd.get(), msg, size, 0);
+    // MSG_NOSIGNAL: do NOT raise SIGPIPE if the peer has closed the socket;
+    // send() returns -1 with errno=EPIPE instead, which we handle below.
+    // Without this the default SIGPIPE action terminates the process.
+    const ssize_t numBytesSent = send(_sockfd.get(), msg, size, MSG_NOSIGNAL);
 
-    if (numBytesSent < 0 ) { // send failed
+    if (numBytesSent < 0) { // send failed
         return pipe_ret_t::failure(strerror(errno));
     }
-    if (numBytesSent < size) { // not all bytes were sent
+    if (static_cast<size_t>(numBytesSent) < size) { // not all bytes were sent
         char errorMsg[100];
-        sprintf(errorMsg, "Only %lu bytes out of %lu was sent to client", numBytesSent, size);
+        sprintf(errorMsg, "Only %zd bytes out of %zu was sent to client", numBytesSent, size);
         return pipe_ret_t::failure(errorMsg);
     }
     return pipe_ret_t::success();
