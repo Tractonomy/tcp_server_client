@@ -154,7 +154,22 @@ pipe_ret_t TcpClient::sendMsg(const char * msg, size_t size) {
     const ssize_t numBytesSent = send(_sockfd.get(), msg, size, MSG_NOSIGNAL);
 
     if (numBytesSent < 0) { // send failed
-        return pipe_ret_t::failure(strerror(errno));
+        const int savedErrno = errno;
+        // Fatal socket errors (peer closed, connection reset, broken pipe, bad fd,
+        // host unreachable, etc.) mean the connection is dead. Notify subscribers so
+        // the reconnect logic kicks in; otherwise every subsequent send fails forever
+        // because the receive thread may not observe the disconnect on its own (e.g.
+        // when the peer RSTs while we are blocked in select).
+        if (savedErrno == EPIPE || savedErrno == ECONNRESET ||
+            savedErrno == ENOTCONN || savedErrno == EBADF ||
+            savedErrno == ECONNABORTED || savedErrno == EHOSTUNREACH ||
+            savedErrno == ENETUNREACH || savedErrno == ENETDOWN ||
+            savedErrno == ENETRESET || savedErrno == ESHUTDOWN) {
+            if (_isConnected.exchange(false)) {
+                publishServerDisconnected(pipe_ret_t::failure(strerror(savedErrno)));
+            }
+        }
+        return pipe_ret_t::failure(strerror(savedErrno));
     }
     if (static_cast<size_t>(numBytesSent) < size) { // not all bytes were sent
         char errorMsg[100];
@@ -219,7 +234,10 @@ void TcpClient::receiveTask() {
         }
 
         char msg[MAX_PACKET_SIZE];
-        const size_t numOfBytesReceived = recv(_sockfd.get(), msg, MAX_PACKET_SIZE, 0);
+        // recv() returns ssize_t (can be -1 on error). Using size_t here silently
+        // turns -1 into SIZE_MAX, which is NOT < 1, so abrupt disconnects (RST,
+        // ECONNRESET) used to bypass the disconnect handler entirely.
+        const ssize_t numOfBytesReceived = recv(_sockfd.get(), msg, MAX_PACKET_SIZE, 0);
 
         if(numOfBytesReceived < 1) {
             std::string errorMsg;
@@ -232,7 +250,7 @@ void TcpClient::receiveTask() {
             publishServerDisconnected(pipe_ret_t::failure(errorMsg));
             return;
         } else {
-            publishServerMsg(msg, numOfBytesReceived);
+            publishServerMsg(msg, static_cast<size_t>(numOfBytesReceived));
         }
     }
 }
