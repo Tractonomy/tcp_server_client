@@ -15,28 +15,81 @@ TcpClient::~TcpClient() {
 pipe_ret_t TcpClient::connectTo(
     const std::string & address, int port,
     const std::string & client_addr, int client_port) {
+    // ATRS-1429 (defect #2): a caller may invoke connectTo() without first
+    // calling close() (e.g. PBHandler::connect() does this on reconnect). If a
+    // live socket / receive thread still exists, tear it down here so the new
+    // connection does not inherit a stale recv thread blocked in select() on
+    // the previous fd.
+    if (!_isClosed) {
+        close();
+    }
+
+    // ATRS-1429 (defect #3): every failure-return path below must close the
+    // socket fd allocated by initializeSocket(). Previously the fd was leaked
+    // because FileDescriptor::set() does not close-on-overwrite and _isClosed
+    // remained `true` (so the guard above is skipped on the next retry, and
+    // initializeSocket() simply orphans the previous fd). At 1 Hz retry this
+    // exhausts RLIMIT_NOFILE in ~17 minutes, after which socket() returns
+    // EMFILE and the driver is wedged ("Too many open files").
     try {
         initializeSocket();
         setAddress(address, port);
         setClientAddress(client_addr, client_port);
     } catch (const std::runtime_error& error) {
+        // initializeSocket() throws only when socket() itself failed, in
+        // which case _sockfd holds -1 and nothing needs closing. setAddress()
+        // / setClientAddress() throw after socket() has succeeded, so the fd
+        // must be released here.
+        if (_sockfd.get() >= 0) {
+            ::close(_sockfd.get());
+            _sockfd.set(-1);
+        }
         return pipe_ret_t::failure(error.what());
     }
 
     const int bindResult = bind(_sockfd.get(), (struct sockaddr *)&_client, sizeof(_client));
     if (bindResult == -1) {
-        return pipe_ret_t::failure(strerror(errno));
+        const int savedErrno = errno;
+        ::close(_sockfd.get());
+        _sockfd.set(-1);
+        return pipe_ret_t::failure(strerror(savedErrno));
     }
 
     const int connectResult = connect(_sockfd.get() , (struct sockaddr *)&_server , sizeof(_server));
     const bool connectionFailed = (connectResult == -1);
     if (connectionFailed) {
-        return pipe_ret_t::failure(strerror(errno));
+        const int savedErrno = errno;
+        ::close(_sockfd.get());
+        _sockfd.set(-1);
+        return pipe_ret_t::failure(strerror(savedErrno));
     }
 
-    startReceivingMessages();
+    // ATRS-1429 cold-boot fix: now that connect() has succeeded, apply
+    // SO_SNDTIMEO so subsequent blocking send() calls do not hang forever if
+    // the peer goes silent. This MUST be done after connect() — setting it
+    // before connect() makes Linux use it as the connect() timeout, which
+    // causes EINPROGRESS retries forever when the MCU TCP listener takes
+    // longer than the timeout to come up at boot.
+    struct timeval tv_send = {
+        .tv_sec = 0,
+        .tv_usec = 100000,
+    };
+    if (setsockopt(_sockfd.get(), SOL_SOCKET, SO_SNDTIMEO, &tv_send, sizeof(tv_send)) == -1) {
+        std::cerr << "SNDTIMEO error" << std::endl;
+    }
+
+    // ATRS-1429 (defect #1): order matters. Set _isConnected BEFORE spawning
+    // the receive thread. receiveTask()'s outer loop is `while(_isConnected)`;
+    // if the new thread runs before this assignment it observes the leftover
+    // `false` from the previous terminateReceiveThread() and exits
+    // immediately. Sends keep succeeding (queued into the kernel TX buffer)
+    // until backpressure produces EPIPE much later, while nothing is
+    // consuming the RX buffer — exactly the dead-state where the driver
+    // believes it is connected but the kernel Recv-Q grows unbounded and no
+    // MCU response is ever delivered to the ROS callback.
     _isConnected = true;
     _isClosed = false;
+    startReceivingMessages();
 
     return pipe_ret_t::success();
 }
@@ -59,17 +112,18 @@ void TcpClient::initializeSocket() {
         .tv_sec = 0,
         .tv_usec = 0,
     };
-    // set timeout for send to inform user of slow connection
-    struct timeval tv_send = {
-        .tv_sec = 0,
-        .tv_usec = 100000,
-    };
+    // NOTE: SO_SNDTIMEO is deliberately NOT set here. On a blocking TCP socket
+    // Linux applies SO_SNDTIMEO as the connect() timeout. With a small value
+    // (we previously used 100 ms) a cold-boot connect to an MCU whose TCP
+    // listener has not finished initialising (W5500 powered but STM32 still
+    // booting and no socket configured on the chip yet) returns -1 with
+    // errno=EINPROGRESS and the driver retries forever until the listener
+    // appears, often >10 s. SO_SNDTIMEO is intended to bound blocking send()
+    // calls, not connect(); it is therefore applied in connectTo() AFTER
+    // connect() succeeds (ATRS-1429 cold-boot fix).
 
     if (setsockopt(_sockfd.get(), SOL_SOCKET, SO_RCVTIMEO, &tv_recv, sizeof(tv_recv)) == -1) {
         std::cerr << "RCVTIMEO error" << std::endl;
-    }
-    if (setsockopt(_sockfd.get(), SOL_SOCKET, SO_SNDTIMEO, &tv_send, sizeof(tv_send)) == -1) {
-        std::cerr << "SNDTIMEO error" << std::endl;
     }
 
     int option = 1;
@@ -148,14 +202,32 @@ pipe_ret_t TcpClient::sendMsg(const char * msg, size_t size) {
         return pipe_ret_t::failure("client closed, not sending");
     }
 
-    const size_t numBytesSent = send(_sockfd.get(), msg, size, 0);
+    // MSG_NOSIGNAL: do NOT raise SIGPIPE if the peer has closed the socket;
+    // send() returns -1 with errno=EPIPE instead, which we handle below.
+    // Without this the default SIGPIPE action terminates the process.
+    const ssize_t numBytesSent = send(_sockfd.get(), msg, size, MSG_NOSIGNAL);
 
-    if (numBytesSent < 0 ) { // send failed
-        return pipe_ret_t::failure(strerror(errno));
+    if (numBytesSent < 0) { // send failed
+        const int savedErrno = errno;
+        // Fatal socket errors (peer closed, connection reset, broken pipe, bad fd,
+        // host unreachable, etc.) mean the connection is dead. Notify subscribers so
+        // the reconnect logic kicks in; otherwise every subsequent send fails forever
+        // because the receive thread may not observe the disconnect on its own (e.g.
+        // when the peer RSTs while we are blocked in select).
+        if (savedErrno == EPIPE || savedErrno == ECONNRESET ||
+            savedErrno == ENOTCONN || savedErrno == EBADF ||
+            savedErrno == ECONNABORTED || savedErrno == EHOSTUNREACH ||
+            savedErrno == ENETUNREACH || savedErrno == ENETDOWN ||
+            savedErrno == ENETRESET || savedErrno == ESHUTDOWN) {
+            if (_isConnected.exchange(false)) {
+                publishServerDisconnected(pipe_ret_t::failure(strerror(savedErrno)));
+            }
+        }
+        return pipe_ret_t::failure(strerror(savedErrno));
     }
-    if (numBytesSent < size) { // not all bytes were sent
+    if (static_cast<size_t>(numBytesSent) < size) { // not all bytes were sent
         char errorMsg[100];
-        sprintf(errorMsg, "Only %lu bytes out of %lu was sent to client", numBytesSent, size);
+        sprintf(errorMsg, "Only %zd bytes out of %zu was sent to client", numBytesSent, size);
         return pipe_ret_t::failure(errorMsg);
     }
     return pipe_ret_t::success();
@@ -216,7 +288,10 @@ void TcpClient::receiveTask() {
         }
 
         char msg[MAX_PACKET_SIZE];
-        const size_t numOfBytesReceived = recv(_sockfd.get(), msg, MAX_PACKET_SIZE, 0);
+        // recv() returns ssize_t (can be -1 on error). Using size_t here silently
+        // turns -1 into SIZE_MAX, which is NOT < 1, so abrupt disconnects (RST,
+        // ECONNRESET) used to bypass the disconnect handler entirely.
+        const ssize_t numOfBytesReceived = recv(_sockfd.get(), msg, MAX_PACKET_SIZE, 0);
 
         if(numOfBytesReceived < 1) {
             std::string errorMsg;
@@ -229,7 +304,7 @@ void TcpClient::receiveTask() {
             publishServerDisconnected(pipe_ret_t::failure(errorMsg));
             return;
         } else {
-            publishServerMsg(msg, numOfBytesReceived);
+            publishServerMsg(msg, static_cast<size_t>(numOfBytesReceived));
         }
     }
 }
