@@ -24,23 +24,44 @@ pipe_ret_t TcpClient::connectTo(
         close();
     }
 
+    // ATRS-1429 (defect #3): every failure-return path below must close the
+    // socket fd allocated by initializeSocket(). Previously the fd was leaked
+    // because FileDescriptor::set() does not close-on-overwrite and _isClosed
+    // remained `true` (so the guard above is skipped on the next retry, and
+    // initializeSocket() simply orphans the previous fd). At 1 Hz retry this
+    // exhausts RLIMIT_NOFILE in ~17 minutes, after which socket() returns
+    // EMFILE and the driver is wedged ("Too many open files").
     try {
         initializeSocket();
         setAddress(address, port);
         setClientAddress(client_addr, client_port);
     } catch (const std::runtime_error& error) {
+        // initializeSocket() throws only when socket() itself failed, in
+        // which case _sockfd holds -1 and nothing needs closing. setAddress()
+        // / setClientAddress() throw after socket() has succeeded, so the fd
+        // must be released here.
+        if (_sockfd.get() >= 0) {
+            ::close(_sockfd.get());
+            _sockfd.set(-1);
+        }
         return pipe_ret_t::failure(error.what());
     }
 
     const int bindResult = bind(_sockfd.get(), (struct sockaddr *)&_client, sizeof(_client));
     if (bindResult == -1) {
-        return pipe_ret_t::failure(strerror(errno));
+        const int savedErrno = errno;
+        ::close(_sockfd.get());
+        _sockfd.set(-1);
+        return pipe_ret_t::failure(strerror(savedErrno));
     }
 
     const int connectResult = connect(_sockfd.get() , (struct sockaddr *)&_server , sizeof(_server));
     const bool connectionFailed = (connectResult == -1);
     if (connectionFailed) {
-        return pipe_ret_t::failure(strerror(errno));
+        const int savedErrno = errno;
+        ::close(_sockfd.get());
+        _sockfd.set(-1);
+        return pipe_ret_t::failure(strerror(savedErrno));
     }
 
     // ATRS-1429 (defect #1): order matters. Set _isConnected BEFORE spawning
