@@ -15,28 +15,81 @@ TcpClient::~TcpClient() {
 pipe_ret_t TcpClient::connectTo(
     const std::string & address, int port,
     const std::string & client_addr, int client_port) {
+    // ATRS-1429 (defect #2): a caller may invoke connectTo() without first
+    // calling close() (e.g. PBHandler::connect() does this on reconnect). If a
+    // live socket / receive thread still exists, tear it down here so the new
+    // connection does not inherit a stale recv thread blocked in select() on
+    // the previous fd.
+    if (!_isClosed) {
+        close();
+    }
+
+    // ATRS-1429 (defect #3): every failure-return path below must close the
+    // socket fd allocated by initializeSocket(). Previously the fd was leaked
+    // because FileDescriptor::set() does not close-on-overwrite and _isClosed
+    // remained `true` (so the guard above is skipped on the next retry, and
+    // initializeSocket() simply orphans the previous fd). At 1 Hz retry this
+    // exhausts RLIMIT_NOFILE in ~17 minutes, after which socket() returns
+    // EMFILE and the driver is wedged ("Too many open files").
     try {
         initializeSocket();
         setAddress(address, port);
         setClientAddress(client_addr, client_port);
     } catch (const std::runtime_error& error) {
+        // initializeSocket() throws only when socket() itself failed, in
+        // which case _sockfd holds -1 and nothing needs closing. setAddress()
+        // / setClientAddress() throw after socket() has succeeded, so the fd
+        // must be released here.
+        if (_sockfd.get() >= 0) {
+            ::close(_sockfd.get());
+            _sockfd.set(-1);
+        }
         return pipe_ret_t::failure(error.what());
     }
 
     const int bindResult = bind(_sockfd.get(), (struct sockaddr *)&_client, sizeof(_client));
     if (bindResult == -1) {
-        return pipe_ret_t::failure(strerror(errno));
+        const int savedErrno = errno;
+        ::close(_sockfd.get());
+        _sockfd.set(-1);
+        return pipe_ret_t::failure(strerror(savedErrno));
     }
 
     const int connectResult = connect(_sockfd.get() , (struct sockaddr *)&_server , sizeof(_server));
     const bool connectionFailed = (connectResult == -1);
     if (connectionFailed) {
-        return pipe_ret_t::failure(strerror(errno));
+        const int savedErrno = errno;
+        ::close(_sockfd.get());
+        _sockfd.set(-1);
+        return pipe_ret_t::failure(strerror(savedErrno));
     }
 
-    startReceivingMessages();
+    // ATRS-1429 cold-boot fix: now that connect() has succeeded, apply
+    // SO_SNDTIMEO so subsequent blocking send() calls do not hang forever if
+    // the peer goes silent. This MUST be done after connect() — setting it
+    // before connect() makes Linux use it as the connect() timeout, which
+    // causes EINPROGRESS retries forever when the MCU TCP listener takes
+    // longer than the timeout to come up at boot.
+    struct timeval tv_send = {
+        .tv_sec = 0,
+        .tv_usec = 100000,
+    };
+    if (setsockopt(_sockfd.get(), SOL_SOCKET, SO_SNDTIMEO, &tv_send, sizeof(tv_send)) == -1) {
+        std::cerr << "SNDTIMEO error" << std::endl;
+    }
+
+    // ATRS-1429 (defect #1): order matters. Set _isConnected BEFORE spawning
+    // the receive thread. receiveTask()'s outer loop is `while(_isConnected)`;
+    // if the new thread runs before this assignment it observes the leftover
+    // `false` from the previous terminateReceiveThread() and exits
+    // immediately. Sends keep succeeding (queued into the kernel TX buffer)
+    // until backpressure produces EPIPE much later, while nothing is
+    // consuming the RX buffer — exactly the dead-state where the driver
+    // believes it is connected but the kernel Recv-Q grows unbounded and no
+    // MCU response is ever delivered to the ROS callback.
     _isConnected = true;
     _isClosed = false;
+    startReceivingMessages();
 
     return pipe_ret_t::success();
 }
@@ -59,17 +112,18 @@ void TcpClient::initializeSocket() {
         .tv_sec = 0,
         .tv_usec = 0,
     };
-    // set timeout for send to inform user of slow connection
-    struct timeval tv_send = {
-        .tv_sec = 0,
-        .tv_usec = 100000,
-    };
+    // NOTE: SO_SNDTIMEO is deliberately NOT set here. On a blocking TCP socket
+    // Linux applies SO_SNDTIMEO as the connect() timeout. With a small value
+    // (we previously used 100 ms) a cold-boot connect to an MCU whose TCP
+    // listener has not finished initialising (W5500 powered but STM32 still
+    // booting and no socket configured on the chip yet) returns -1 with
+    // errno=EINPROGRESS and the driver retries forever until the listener
+    // appears, often >10 s. SO_SNDTIMEO is intended to bound blocking send()
+    // calls, not connect(); it is therefore applied in connectTo() AFTER
+    // connect() succeeds (ATRS-1429 cold-boot fix).
 
     if (setsockopt(_sockfd.get(), SOL_SOCKET, SO_RCVTIMEO, &tv_recv, sizeof(tv_recv)) == -1) {
         std::cerr << "RCVTIMEO error" << std::endl;
-    }
-    if (setsockopt(_sockfd.get(), SOL_SOCKET, SO_SNDTIMEO, &tv_send, sizeof(tv_send)) == -1) {
-        std::cerr << "SNDTIMEO error" << std::endl;
     }
 
     int option = 1;
