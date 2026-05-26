@@ -64,6 +64,20 @@ pipe_ret_t TcpClient::connectTo(
         return pipe_ret_t::failure(strerror(savedErrno));
     }
 
+    // ATRS-1429 cold-boot fix: now that connect() has succeeded, apply
+    // SO_SNDTIMEO so subsequent blocking send() calls do not hang forever if
+    // the peer goes silent. This MUST be done after connect() — setting it
+    // before connect() makes Linux use it as the connect() timeout, which
+    // causes EINPROGRESS retries forever when the MCU TCP listener takes
+    // longer than the timeout to come up at boot.
+    struct timeval tv_send = {
+        .tv_sec = 0,
+        .tv_usec = 100000,
+    };
+    if (setsockopt(_sockfd.get(), SOL_SOCKET, SO_SNDTIMEO, &tv_send, sizeof(tv_send)) == -1) {
+        std::cerr << "SNDTIMEO error" << std::endl;
+    }
+
     // ATRS-1429 (defect #1): order matters. Set _isConnected BEFORE spawning
     // the receive thread. receiveTask()'s outer loop is `while(_isConnected)`;
     // if the new thread runs before this assignment it observes the leftover
@@ -98,17 +112,18 @@ void TcpClient::initializeSocket() {
         .tv_sec = 0,
         .tv_usec = 0,
     };
-    // set timeout for send to inform user of slow connection
-    struct timeval tv_send = {
-        .tv_sec = 0,
-        .tv_usec = 100000,
-    };
+    // NOTE: SO_SNDTIMEO is deliberately NOT set here. On a blocking TCP socket
+    // Linux applies SO_SNDTIMEO as the connect() timeout. With a small value
+    // (we previously used 100 ms) a cold-boot connect to an MCU whose TCP
+    // listener has not finished initialising (W5500 powered but STM32 still
+    // booting and no socket configured on the chip yet) returns -1 with
+    // errno=EINPROGRESS and the driver retries forever until the listener
+    // appears, often >10 s. SO_SNDTIMEO is intended to bound blocking send()
+    // calls, not connect(); it is therefore applied in connectTo() AFTER
+    // connect() succeeds (ATRS-1429 cold-boot fix).
 
     if (setsockopt(_sockfd.get(), SOL_SOCKET, SO_RCVTIMEO, &tv_recv, sizeof(tv_recv)) == -1) {
         std::cerr << "RCVTIMEO error" << std::endl;
-    }
-    if (setsockopt(_sockfd.get(), SOL_SOCKET, SO_SNDTIMEO, &tv_send, sizeof(tv_send)) == -1) {
-        std::cerr << "SNDTIMEO error" << std::endl;
     }
 
     int option = 1;
